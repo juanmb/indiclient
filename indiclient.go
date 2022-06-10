@@ -168,7 +168,6 @@ func (c *INDIClient) Connect(network, address string) error {
 	c.write = make(chan interface{}, c.bufferSize)
 
 	c.startRead()
-	c.startWrite()
 
 	return nil
 }
@@ -200,11 +199,7 @@ func (c *INDIClient) Disconnect() error {
 
 // IsConnected returns true if the client is currently connected to an INDI server. Otherwise, returns false.
 func (c *INDIClient) IsConnected() bool {
-	if c.conn != nil {
-		return true
-	}
-
-	return false
+	return c.conn != nil
 }
 
 // Devices returns the current list of INDI devices with their current state.
@@ -328,6 +323,23 @@ func (c *INDIClient) CloseBlobStream(deviceName, propName, blobName string, id s
 	return
 }
 
+func (c *INDIClient) send(item interface{}) error {
+	b, err := xml.Marshal(item)
+	if err != nil {
+		c.log.WithError(err).Error("error in xml.Marshal")
+		return err
+	}
+
+	c.log.WithField("cmd", string(b)).Debug("sending command")
+
+	_, err = c.conn.Write(b)
+	if err != nil {
+		c.log.WithError(err).Error("error in conn.Write")
+		return err
+	}
+	return nil
+}
+
 // GetProperties sends a command to the INDI server to retreive the property definitions for the given deviceName and propName.
 // deviceName and propName are optional.
 func (c *INDIClient) GetProperties(deviceName, propName string) error {
@@ -341,9 +353,7 @@ func (c *INDIClient) GetProperties(deviceName, propName string) error {
 		Name:    propName,
 	}
 
-	c.write <- cmd
-
-	return nil
+	return c.send(cmd)
 }
 
 // EnableBlob sends a command to the INDI server to enable/disable BLOBs for the current connection.
@@ -365,9 +375,7 @@ func (c *INDIClient) EnableBlob(deviceName, propName string, val BlobEnable) err
 		Value:  val,
 	}
 
-	c.write <- cmd
-
-	return nil
+	return c.send(cmd)
 }
 
 // SetTextValue sends a command to the INDI server to change the value of a textVector.
@@ -408,9 +416,7 @@ func (c *INDIClient) SetTextValue(deviceName, propName, textName, textValue stri
 		},
 	}
 
-	c.write <- cmd
-
-	return nil
+	return c.send(cmd)
 }
 
 // SetNumberValue sends a command to the INDI server to change the value of a numberVector.
@@ -451,9 +457,7 @@ func (c *INDIClient) SetNumberValue(deviceName, propName, NumberName, NumberValu
 		},
 	}
 
-	c.write <- cmd
-
-	return nil
+	return c.send(cmd)
 }
 
 // SetSwitchValue sends a command to the INDI server to change the value of a switchVector.
@@ -496,9 +500,7 @@ func (c *INDIClient) SetSwitchValue(deviceName, propName, switchName string, swi
 		},
 	}
 
-	c.write <- cmd
-
-	return nil
+	return c.send(cmd)
 }
 
 // SetBlobValue sends a command to the INDI server to change the value of a blobVector.
@@ -541,9 +543,7 @@ func (c *INDIClient) SetBlobValue(deviceName, propName, blobName, blobValue, blo
 		},
 	}
 
-	c.write <- cmd
-
-	return nil
+	return c.send(cmd)
 }
 
 func (c *INDIClient) findDevice(name string) (Device, error) {
@@ -571,6 +571,7 @@ func (c *INDIClient) findOrCreateDevice(name string) Device {
 }
 
 type indiMessageHandler interface {
+	getProperties(item *GetProperties)
 	defTextVector(item *DefTextVector)
 	defSwitchVector(item *DefSwitchVector)
 	defNumberVector(item *DefNumberVector)
@@ -583,6 +584,10 @@ type indiMessageHandler interface {
 	setBlobVector(item *SetBlobVector)
 	message(item *Message)
 	delProperty(item *DelProperty)
+}
+
+func (c *INDIClient) getProperties(item *GetProperties) {
+	//TODO
 }
 
 func (c *INDIClient) defTextVector(item *DefTextVector) {
@@ -1102,6 +1107,8 @@ func (c *INDIClient) startRead() {
 			log.WithField("item", i).Debug("got message")
 
 			switch item := i.(type) {
+			case *GetProperties:
+				handler.getProperties(item)
 			case *DefTextVector:
 				handler.defTextVector(item)
 			case *DefSwitchVector:
@@ -1127,7 +1134,7 @@ func (c *INDIClient) startRead() {
 			case *DelProperty:
 				handler.delProperty(item)
 			default:
-				log.WithField("type", fmt.Sprintf("%T", item)).Warn("unknown type")
+				log.WithField("type", fmt.Sprintf("%T", item)).Warn(fmt.Sprintf("unknown type %v", i))
 			}
 		}
 	}(c.read, c.log, c)
@@ -1186,8 +1193,10 @@ func (c *INDIClient) startRead() {
 					inner = &Message{}
 				case "delProperty":
 					inner = &DelProperty{}
+				case "getProperties":
+					inner = &GetProperties{}
 				default:
-					log.WithField("element", inElement).Error("unknown element")
+					log.WithField("element", inElement).Error("unknown element " + inElement)
 				}
 
 				if inner != nil {
@@ -1206,24 +1215,4 @@ func (c *INDIClient) startRead() {
 			}
 		}
 	}(c.conn, c.read, c.log)
-}
-
-func (c *INDIClient) startWrite() {
-	go func(conn io.Writer, w <-chan interface{}, log logging.Logger) {
-		for item := range w {
-			b, err := xml.Marshal(item)
-			if err != nil {
-				log.WithError(err).Error("error in xml.Marshal")
-				continue
-			}
-
-			log.WithField("cmd", string(b)).Debug("sending command")
-
-			_, err = conn.Write(b)
-			if err != nil {
-				log.WithError(err).Error("error in conn.Write")
-				continue
-			}
-		}
-	}(c.conn, c.write, c.log)
 }
